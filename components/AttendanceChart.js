@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import {
   Bar,
   BarChart,
@@ -16,15 +16,15 @@ import {
 import GlassCard from "@/components/GlassCard";
 
 export default function AttendanceChart({ data, percentage }) {
-  const [isMounted, setIsMounted] = useState(false);
-
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
+  const isMounted = useSyncExternalStore(
+    () => () => {},
+    () => true,
+    () => false
+  );
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[0.92fr_1.08fr]">
-      <GlassCard className="p-6">
+    <div className="grid min-w-0 gap-6 xl:grid-cols-[0.92fr_1.08fr]">
+      <GlassCard className="min-w-0 p-6">
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Attendance Share</p>
@@ -35,7 +35,7 @@ export default function AttendanceChart({ data, percentage }) {
             <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Presence</p>
           </div>
         </div>
-        <div className="mt-6 h-72">
+        <div className="mt-6 h-80 rounded-[28px] border border-white/6 bg-[linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01))] p-2">
           {isMounted ? (
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -69,12 +69,12 @@ export default function AttendanceChart({ data, percentage }) {
         </div>
       </GlassCard>
 
-      <GlassCard className="p-6">
+      <GlassCard className="min-w-0 p-6">
         <div>
           <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Period Analytics</p>
           <h3 className="mt-2 font-display text-xl text-white">Present vs Absent By Period</h3>
         </div>
-        <div className="mt-6 h-72">
+        <div className="mt-6 h-80 rounded-[28px] border border-white/6 bg-[linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01))] p-2">
           {isMounted ? (
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data.periods}>

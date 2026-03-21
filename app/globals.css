@@ -54,6 +54,17 @@ select {
   font: inherit;
 }
 
+a,
+button,
+[role="button"],
+summary {
+  cursor: pointer !important;
+}
+
+button {
+  cursor: pointer;
+}
+
 ::selection {
   background: rgba(103, 232, 249, 0.3);
   color: #fff;
@@ -98,6 +109,26 @@ select {
 
 .neon-text {
   text-shadow: 0 0 18px rgba(103, 232, 249, 0.32);
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1) brightness(1.2);
+  opacity: 0.8;
+}
+
+select,
+option {
+  color: var(--foreground);
+}
+
+select {
+  background-color: transparent;
+  color-scheme: dark;
+}
+
+option {
+  background: #091122;
+  color: var(--foreground);
 }
 
 .scrollbar-thin {

@@ -1,238 +1,265 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { onValue, ref } from "firebase/database";
-import {
-  Activity,
-  CalendarDays,
-  CircleUserRound,
-  Download,
-  Fingerprint,
-  Shield,
-  TriangleAlert,
-} from "lucide-react";
-import AttendanceChart from "@/components/AttendanceChart";
-import AttendanceFilters from "@/components/AttendanceFilters";
-import AttendanceTable from "@/components/AttendanceTable";
+import { useRouter } from "next/navigation";
+import { collection, getDocs, limit, query, where } from "firebase/firestore";
+import { BookOpenCheck, GraduationCap, ShieldCheck, UserPlus2 } from "lucide-react";
 import GlassCard from "@/components/GlassCard";
-import LiveClock from "@/components/LiveClock";
-import MetricCard from "@/components/MetricCard";
-import { database, getFirebaseAnalytics } from "@/lib/firebase";
+import HolidayPanel from "@/components/HolidayPanel";
+import TimetableBoard from "@/components/TimetableBoard";
+import { firestore } from "@/lib/firebase";
+import { useSessionStore } from "@/lib/sessionStore";
 import {
-  downloadAttendanceCsv,
-  filterAttendanceRecords,
-  formatDateKey,
-  getAttendanceStats,
-  getChartData,
-  getPeriodOptions,
-  normalizeAttendanceRecords,
-} from "@/utils/attendanceLogic";
+  normalizeFirestoreProfile,
+  normalizeHoliday,
+  normalizeIdentifier,
+  toSessionProfile,
+} from "@/utils/portalLogic";
 
-export default function Home() {
-  const [records, setRecords] = useState([]);
-  const [status, setStatus] = useState("loading");
-  const [error, setError] = useState("");
-  const [lastSync, setLastSync] = useState(null);
-  const [filters, setFilters] = useState({
-    date: "",
-    period: "",
-    search: "",
+const ROLE_COPY = {
+  admin: {
+    label: "Admin Login",
+    icon: ShieldCheck,
+    title: "Admin Access",
+    description: "Login for full subject and class attendance.",
+    collectionName: "admins",
+    createHref: "/register/admin",
+  },
+  student: {
+    label: "Student Login",
+    icon: GraduationCap,
+    title: "Student Access",
+    description: "Login to view your own attendance.",
+    collectionName: "users",
+    createHref: "/register/student",
+  },
+};
+
+export default function HomePage() {
+  const router = useRouter();
+  const setSession = useSessionStore((state) => state.setSession);
+  const [role, setRole] = useState("student");
+  const [loginForm, setLoginForm] = useState({
+    identifier: "",
+    password: "",
   });
+  const [holidays, setHolidays] = useState([]);
+  const [status, setStatus] = useState("idle");
+  const [message, setMessage] = useState("Login with your ID and password.");
 
   useEffect(() => {
-    getFirebaseAnalytics().catch(() => null);
+    let mounted = true;
 
-    const attendanceRef = ref(database, "Attendance");
-    const unsubscribe = onValue(
-      attendanceRef,
-      (snapshot) => {
-        const data = snapshot.val();
-        const nextRecords = normalizeAttendanceRecords(data);
-        setRecords(nextRecords);
-        setStatus("ready");
-        setError("");
-        setLastSync(new Date());
-      },
-      (firebaseError) => {
-        setStatus("error");
-        setError(firebaseError.message || "Unable to load attendance feed.");
-      }
-    );
+    getDocs(collection(firestore, "publicHolidays"))
+      .then((snapshot) => {
+        if (mounted) {
+          setHolidays(snapshot.docs.map(normalizeHoliday));
+        }
+      })
+      .catch(() => {
+        if (mounted) {
+          setHolidays([]);
+        }
+      });
 
-    return () => unsubscribe();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  const periodOptions = useMemo(() => getPeriodOptions(records), [records]);
-  const defaultDate = useMemo(
-    () => (records[0]?.date ? formatDateKey(records[0].date) : ""),
-    [records]
-  );
-  const effectiveFilters = useMemo(
-    () => ({ ...filters, date: filters.date || defaultDate }),
-    [filters, defaultDate]
-  );
+  const currentRole = ROLE_COPY[role];
+  const CurrentIcon = currentRole.icon;
 
-  const filteredRecords = useMemo(
-    () => filterAttendanceRecords(records, effectiveFilters),
-    [records, effectiveFilters]
-  );
-
-  const stats = useMemo(() => getAttendanceStats(filteredRecords), [filteredRecords]);
-  const chartData = useMemo(() => getChartData(filteredRecords), [filteredRecords]);
-
-  function updateFilter(field, value) {
-    setFilters((current) => ({ ...current, [field]: value }));
+  function updateLoginForm(field, value) {
+    setLoginForm((current) => ({ ...current, [field]: value }));
   }
 
-  function clearFilters() {
-    setFilters({ date: "", period: "", search: "" });
-  }
+  async function handleLogin(event) {
+    event.preventDefault();
 
-  function exportCsv() {
-    downloadAttendanceCsv(filteredRecords, "fingerprint-attendance-report.csv");
+    const normalizedValue = normalizeIdentifier(loginForm.identifier);
+
+    if (!normalizedValue || !loginForm.password.trim()) {
+      setStatus("error");
+      setMessage("Enter your ID and password.");
+      return;
+    }
+
+    setStatus("loading");
+    setMessage("Checking your account...");
+
+    try {
+      const accountQuery = query(
+        collection(firestore, currentRole.collectionName),
+        where("searchTokens", "array-contains", normalizedValue),
+        limit(5)
+      );
+      const snapshot = await getDocs(accountQuery);
+
+      if (snapshot.empty) {
+        setStatus("error");
+        setMessage("Account not found.");
+        return;
+      }
+
+      const matchedProfile = snapshot.docs
+        .map(normalizeFirestoreProfile)
+        .find((profile) => profile.password === loginForm.password.trim());
+
+      if (!matchedProfile) {
+        setStatus("error");
+        setMessage("Wrong password.");
+        return;
+      }
+
+      setSession(toSessionProfile(matchedProfile));
+      setStatus("success");
+      setMessage(`Welcome ${matchedProfile.name}. Redirecting...`);
+      router.push(role === "admin" ? "/admin" : "/student");
+    } catch (error) {
+      setStatus("error");
+      setMessage(error.message || "Unable to login.");
+    }
   }
 
   return (
     <main className="relative min-h-screen overflow-hidden px-4 py-6 text-white sm:px-6 lg:px-8">
-      <div className="grid-glow absolute inset-0 opacity-40" />
+      <div className="grid-glow absolute inset-0 opacity-25" />
       <div className="absolute left-[-8rem] top-[-6rem] h-72 w-72 rounded-full bg-purple-500/20 blur-3xl" />
-      <div className="absolute right-[-6rem] top-32 h-64 w-64 rounded-full bg-cyan-400/20 blur-3xl" />
+      <div className="absolute right-[-6rem] top-24 h-64 w-64 rounded-full bg-cyan-400/20 blur-3xl" />
       <div className="absolute bottom-[-8rem] left-1/2 h-80 w-80 -translate-x-1/2 rounded-full bg-blue-500/20 blur-3xl" />
 
       <div className="relative mx-auto max-w-7xl space-y-6">
-        <motion.header
-          initial={{ opacity: 0, y: 24 }}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className="grid gap-6 xl:grid-cols-[1.3fr_0.7fr]"
+          transition={{ duration: 0.45 }}
+          className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]"
         >
-          <GlassCard className="overflow-hidden p-6 sm:p-8">
-            <div className="flex flex-wrap items-start justify-between gap-6">
-              <div className="max-w-3xl">
-                <div className="inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-xs uppercase tracking-[0.32em] text-cyan-300">
-                  <Fingerprint className="h-4 w-4" />
-                  Fingerprint Attendance System
-                </div>
-                <h1 className="neon-text mt-6 font-display text-3xl font-extrabold uppercase tracking-[0.18em] text-white sm:text-5xl">
-                  Smart Classroom Attendance Command Center
-                </h1>
-                <p className="mt-5 max-w-2xl text-base leading-8 text-slate-300 sm:text-lg">
-                  Watch fingerprint scans flow into Firebase in real time, validate attendance against class-period rules, and monitor student presence with a neon-lit analytics dashboard.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-3">
-                <Link
-                  href="/login"
-                  className="rounded-2xl border border-white/10 bg-white/[0.06] px-5 py-3 text-sm font-semibold text-white transition hover:border-cyan-300/30 hover:bg-white/10"
-                >
-                  Admin Login
-                </Link>
-                <button
-                  type="button"
-                  onClick={exportCsv}
-                  className="inline-flex items-center gap-2 rounded-2xl bg-linear-to-r from-cyan-400 via-blue-500 to-purple-500 px-5 py-3 text-sm font-semibold text-slate-950 shadow-[0_0_30px_rgba(56,189,248,0.3)] transition hover:scale-[1.02]"
-                >
-                  <Download className="h-4 w-4" />
-                  Export Attendance
-                </button>
-              </div>
+          <GlassCard className="p-6 sm:p-8">
+            <div className="inline-flex items-center gap-3 rounded-full border border-cyan-400/20 bg-cyan-400/10 px-4 py-2 text-[11px] uppercase tracking-[0.32em] text-cyan-300">
+              <BookOpenCheck className="h-4 w-4" />
+              Attendance Portal
             </div>
 
-            <div className="mt-8 grid gap-4 md:grid-cols-3">
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4">
-                <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Realtime Feed</p>
-                <p className="mt-3 font-display text-xl text-cyan-300">Firebase RTDB</p>
-                <p className="mt-2 text-sm text-slate-400">Realtime listener is connected to the `Attendance` node.</p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4">
-                <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Attendance Logic</p>
-                <p className="mt-3 font-display text-xl text-emerald-300">10 Min Grace</p>
-                <p className="mt-2 text-sm text-slate-400">Entries inside the grace window are marked present automatically.</p>
-              </div>
-              <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-4">
-                <p className="text-xs uppercase tracking-[0.24em] text-slate-500">Sync Status</p>
-                <p className="mt-3 font-display text-xl text-white">
-                  {status === "loading" ? "Connecting..." : status === "error" ? "Connection Issue" : "Live"}
-                </p>
-                <p className="mt-2 text-sm text-slate-400">
-                  {lastSync ? `Last refresh: ${lastSync.toLocaleTimeString()}` : "Waiting for the first Firebase snapshot."}
-                </p>
-              </div>
+            <h1 className="neon-text mt-6 max-w-3xl font-display text-4xl font-extrabold uppercase tracking-[0.14em] text-white sm:text-5xl">
+              Student And Admin Portal
+            </h1>
+
+            <p className="mt-5 max-w-2xl text-base leading-8 text-slate-300 sm:text-lg">
+              Use separate login and signup pages for students and admins.
+            </p>
+
+            <div className="mt-8 grid gap-4 md:grid-cols-2">
+              {Object.entries(ROLE_COPY).map(([entryRole, config]) => {
+                const EntryIcon = config.icon;
+
+                return (
+                  <button
+                    key={entryRole}
+                    type="button"
+                    onClick={() => setRole(entryRole)}
+                    className={`rounded-3xl border p-5 text-left transition ${
+                      role === entryRole
+                        ? "border-cyan-300/40 bg-cyan-400/10 shadow-[0_0_35px_rgba(34,211,238,0.12)]"
+                        : "border-white/10 bg-white/[0.04] hover:border-cyan-300/20"
+                    }`}
+                  >
+                    <EntryIcon className="h-6 w-6 text-cyan-300" />
+                    <p className="mt-4 font-display text-lg text-white">{config.label}</p>
+                    <p className="mt-2 text-sm text-slate-400">{config.description}</p>
+                  </button>
+                );
+              })}
             </div>
           </GlassCard>
 
-          <LiveClock />
-        </motion.header>
-
-        {error ? (
-          <GlassCard className="border-rose-400/20 p-5">
-            <div className="flex items-start gap-3 text-rose-200">
-              <TriangleAlert className="mt-0.5 h-5 w-5 shrink-0" />
+          <GlassCard className="p-6 sm:p-8">
+            <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="font-display text-lg text-white">Realtime connection error</p>
-                <p className="mt-1 text-sm text-rose-100/90">{error}</p>
+                <p className="text-xs uppercase tracking-[0.28em] text-slate-400">
+                  {currentRole.label}
+                </p>
+                <h2 className="mt-2 font-display text-3xl text-white">{currentRole.title}</h2>
+              </div>
+              <CurrentIcon className="h-8 w-8 text-cyan-300" />
+            </div>
+
+            <form className="mt-8 space-y-4" onSubmit={handleLogin}>
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-400">
+                  Roll Number or User ID
+                </span>
+                <input
+                  type="text"
+                  value={loginForm.identifier}
+                  onChange={(event) => updateLoginForm("identifier", event.target.value)}
+                  placeholder="Enter your ID"
+                  className="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3.5 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-300/40"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-400">
+                  Password
+                </span>
+                <input
+                  type="password"
+                  value={loginForm.password}
+                  onChange={(event) => updateLoginForm("password", event.target.value)}
+                  placeholder="Enter your password"
+                  className="w-full rounded-2xl border border-white/10 bg-slate-950/40 px-4 py-3.5 text-sm text-white outline-none transition placeholder:text-slate-500 focus:border-cyan-300/40"
+                />
+              </label>
+
+              <button
+                type="submit"
+                className="w-full rounded-2xl bg-linear-to-r from-cyan-400 via-blue-500 to-purple-500 px-5 py-3.5 font-semibold text-slate-950 shadow-[0_0_30px_rgba(56,189,248,0.3)] transition hover:scale-[1.01]"
+              >
+                Open {role === "admin" ? "Admin" : "Student"} Portal
+              </button>
+            </form>
+
+            <div className="mt-8 border-t border-white/10 pt-8">
+              <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Create Account</p>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <Link
+                  href="/register/student"
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.06] px-5 py-3.5 text-sm font-semibold text-white transition hover:border-cyan-300/30 hover:bg-white/10"
+                >
+                  <UserPlus2 className="h-4 w-4" />
+                  Student Signup
+                </Link>
+                <Link
+                  href="/register/admin"
+                  className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.06] px-5 py-3.5 text-sm font-semibold text-white transition hover:border-cyan-300/30 hover:bg-white/10"
+                >
+                  <UserPlus2 className="h-4 w-4" />
+                  Admin Signup
+                </Link>
               </div>
             </div>
+
+            <div
+              className={`mt-6 rounded-2xl border px-4 py-3 text-sm ${
+                status === "error"
+                  ? "border-rose-400/25 bg-rose-500/10 text-rose-200"
+                  : status === "success"
+                    ? "border-emerald-400/25 bg-emerald-500/10 text-emerald-200"
+                    : "border-white/10 bg-white/5 text-slate-300"
+              }`}
+            >
+              {message}
+            </div>
           </GlassCard>
-        ) : null}
+        </motion.section>
 
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard
-            title="Total Students"
-            value={stats.totalStudents}
-            detail="Visible after active filters"
-            accent="#67e8f9"
-            icon={CircleUserRound}
-          />
-          <MetricCard
-            title="Present Count"
-            value={stats.presentCount}
-            detail="Fingerprint scans within grace window"
-            accent="#4ade80"
-            icon={Shield}
-          />
-          <MetricCard
-            title="Absent Count"
-            value={stats.absentCount}
-            detail="Detected after the attendance cutoff"
-            accent="#fb7185"
-            icon={TriangleAlert}
-          />
-          <MetricCard
-            title="Attendance %"
-            value={`${stats.attendancePercentage}%`}
-            detail={`${stats.lateCount} late entries flagged`}
-            accent="#a855f7"
-            icon={Activity}
-          />
+        <section className="space-y-6">
+          <TimetableBoard />
+          <HolidayPanel holidays={holidays} />
         </section>
-
-        <GlassCard className="p-6">
-          <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Filter Console</p>
-              <h2 className="mt-2 font-display text-2xl text-white">Track by day, period, or student</h2>
-            </div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs uppercase tracking-[0.24em] text-slate-400">
-              <CalendarDays className="h-4 w-4 text-cyan-300" />
-              {filteredRecords.length} records in current view
-            </div>
-          </div>
-          <AttendanceFilters
-            filters={{ ...filters, date: filters.date || defaultDate }}
-            periods={periodOptions}
-            onChange={updateFilter}
-            onClear={clearFilters}
-            onExport={exportCsv}
-          />
-        </GlassCard>
-
-        <AttendanceChart data={chartData} percentage={stats.attendancePercentage} />
-
-        <AttendanceTable records={filteredRecords} />
       </div>
     </main>
   );

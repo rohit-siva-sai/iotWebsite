@@ -48,6 +48,25 @@ export function parseTimestamp(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function buildTimestamp(record) {
+  const directValue =
+    record.time ||
+    record.timestamp ||
+    record.detectedAt ||
+    record.scannedAt ||
+    record.createdAt;
+
+  if (directValue) {
+    return directValue;
+  }
+
+  if (record.date && record.time) {
+    return `${record.date} ${record.time}`;
+  }
+
+  return null;
+}
+
 function minutesFromTimeString(time) {
   const [hour = "0", minute = "0"] = time.split(":");
   return Number(hour) * 60 + Number(minute);
@@ -92,8 +111,12 @@ function flattenAttendanceTree(node, path = [], records = []) {
   }
 
   const looksLikeRecord =
+    Object.prototype.hasOwnProperty.call(node, "status") ||
     Object.prototype.hasOwnProperty.call(node, "time") ||
-    Object.prototype.hasOwnProperty.call(node, "timestamp");
+    Object.prototype.hasOwnProperty.call(node, "timestamp") ||
+    Object.prototype.hasOwnProperty.call(node, "userID") ||
+    Object.prototype.hasOwnProperty.call(node, "userId") ||
+    Object.prototype.hasOwnProperty.call(node, "uid");
 
   if (looksLikeRecord) {
     records.push({ ...node, __path: path });
@@ -105,6 +128,23 @@ function flattenAttendanceTree(node, path = [], records = []) {
   });
 
   return records;
+}
+
+function normalizeLookupKey(value) {
+  return String(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function buildUserLookup(users) {
+  if (!users || typeof users !== "object") {
+    return {};
+  }
+
+  return Object.entries(users).reduce((lookup, [key, value]) => {
+    if (value && typeof value === "object") {
+      lookup[normalizeLookupKey(key)] = value;
+    }
+    return lookup;
+  }, {});
 }
 
 function inferPeriodId(rawRecord) {
@@ -132,34 +172,46 @@ function inferPeriodId(rawRecord) {
   return pathMatch?.id || DEFAULT_PERIODS[0].id;
 }
 
-export function normalizeAttendanceRecords(rawData) {
-  if (!rawData) {
+export function normalizeAttendanceRecords(rawData, users = null) {
+  if (!rawData || typeof rawData !== "object") {
     return [];
   }
 
+  const userLookup = buildUserLookup(users);
+
   return flattenAttendanceTree(rawData)
     .map((record, index) => {
-      const timestamp = record.time || record.timestamp;
+      const timestamp = buildTimestamp(record);
       const date = parseTimestamp(timestamp);
       const periodId = inferPeriodId(record);
       const statusData = deriveStatus(timestamp, periodId);
-      const fallbackName = record.__path?.[record.__path.length - 1] || `Student ${index + 1}`;
+      const recordId = String(record.id ?? record.userID ?? record.userId ?? record.uid ?? index + 1);
+      const userPathKey = record.__path?.find((segment) => /^user[_-]?\d+/i.test(segment));
+      const userRecord =
+        userLookup[normalizeLookupKey(userPathKey || "")] ||
+        userLookup[normalizeLookupKey(`user${recordId}`)] ||
+        userLookup[normalizeLookupKey(`user_${recordId}`)] ||
+        userLookup[normalizeLookupKey(recordId)];
+      const fallbackName = userPathKey || record.__path?.[record.__path.length - 2] || `Student ${index + 1}`;
+      const isSuccess =
+        !record.status || String(record.status).toUpperCase() === "SUCCESS";
 
       return {
         recordKey: record.__path?.join("/") || `record-${index + 1}`,
-        name: record.name || fallbackName,
-        id: String(record.id ?? record.userId ?? record.uid ?? index + 1),
+        name: record.name || userRecord?.name || fallbackName,
+        id: recordId,
         timestamp,
         date,
         dateKey: date ? formatDateKey(date) : "unknown",
         timeDetected: date ? formatDisplayTime(date) : "Not available",
         displayDate: date ? formatDisplayDate(date) : "Unknown date",
-        status: statusData.status,
-        isLate: statusData.isLate,
+        status: isSuccess ? statusData.status : "Absent",
+        isLate: isSuccess ? statusData.isLate : false,
         minutesLate: statusData.minutesLate,
         periodId,
         periodLabel: statusData.period.label,
         classStartTime: statusData.period.startTime,
+        rawStatus: record.status || "UNKNOWN",
       };
     })
     .sort((a, b) => (b.date?.getTime() || 0) - (a.date?.getTime() || 0));
