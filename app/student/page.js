@@ -361,30 +361,42 @@ export default function StudentPage() {
         </section>
 
         <GlassCard className="p-6">
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Subject Filter</p>
+              <h3 className="mt-2 font-display text-2xl text-white">Choose Subject</h3>
+              <p className="mt-2 text-sm text-slate-400">
+                Stats and the ledger below follow this subject.
+              </p>
+            </div>
+
+            <div className="w-full max-w-md">
+              <label className="block">
+                <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-400">
+                  Subject
+                </span>
+                <PortalSelect
+                  value={effectiveSubject}
+                  onChange={(event) => setSelectedSubject(event.target.value)}
+                >
+                  {subjectOptions.map((subjectCode) => {
+                    const subject = subjectSummary.find((entry) => entry.subjectCode === subjectCode);
+
+                    return (
+                      <option key={subjectCode} value={subjectCode}>
+                        {subjectCode} - {subject?.subjectName || ""}
+                      </option>
+                    );
+                  })}
+                </PortalSelect>
+              </label>
+            </div>
+          </div>
+        </GlassCard>
+
+        <GlassCard className="p-6">
           <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Subject Summary</p>
           <h3 className="mt-2 font-display text-2xl text-white">By Subject</h3>
-
-          <div className="mt-5 max-w-sm">
-            <label className="block">
-              <span className="mb-2 block text-xs uppercase tracking-[0.24em] text-slate-400">
-                Subject
-              </span>
-              <PortalSelect
-                value={effectiveSubject}
-                onChange={(event) => setSelectedSubject(event.target.value)}
-              >
-                {subjectOptions.map((subjectCode) => {
-                  const subject = subjectSummary.find((entry) => entry.subjectCode === subjectCode);
-
-                  return (
-                    <option key={subjectCode} value={subjectCode}>
-                      {subjectCode} - {subject?.subjectName || ""}
-                    </option>
-                  );
-                })}
-              </PortalSelect>
-            </label>
-          </div>
 
           <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             {subjectSummary.length > 0 ? (

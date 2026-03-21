@@ -310,18 +310,48 @@ export function groupAttendanceBySubject(records) {
 export function mergeAttendanceRecords(...recordSets) {
   const merged = {};
 
+  function getAttendanceRecordKey(record) {
+    if (record.sessionId && record.studentKey) {
+      return `${record.sessionId}__${record.studentKey}`;
+    }
+
+    return record.docId || record.id || "";
+  }
+
+  function isPreferredAttendanceRecord(nextRecord, currentRecord) {
+    if (!currentRecord) {
+      return true;
+    }
+
+    const currentPresent = currentRecord.status === "Present";
+    const nextPresent = nextRecord.status === "Present";
+
+    if (nextPresent !== currentPresent) {
+      return nextPresent;
+    }
+
+    const currentGrace = Boolean(currentRecord.isWithinGraceWindow);
+    const nextGrace = Boolean(nextRecord.isWithinGraceWindow);
+
+    if (nextGrace !== currentGrace) {
+      return nextGrace;
+    }
+
+    return (nextRecord.scannedAt || "") >= (currentRecord.scannedAt || "");
+  }
+
   recordSets
     .flat()
     .filter(Boolean)
     .forEach((record) => {
-      const key = record.docId || record.id || `${record.sessionId}__${record.studentKey}`;
+      const key = getAttendanceRecordKey(record);
       if (!key) {
         return;
       }
 
       const existing = merged[key];
 
-      if (!existing || (record.scannedAt || "") >= (existing.scannedAt || "")) {
+      if (isPreferredAttendanceRecord(record, existing)) {
         merged[key] = record;
       }
     });
