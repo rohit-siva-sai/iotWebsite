@@ -24,7 +24,8 @@ import { useSessionStore } from "@/lib/sessionStore";
 import { formatDateKey } from "@/utils/timetable";
 import { ACADEMIC_HOLIDAYS, generateBaseClassSessions, normalizeExtraClass } from "@/utils/academicCalendar";
 import {
-  groupStudentAttendance,
+  buildStudentSubjectSummary,
+  dedupeStudentLedgerRecords,
   mergeAttendanceRecords,
   normalizeFirestoreProfile,
   normalizeHoliday,
@@ -123,16 +124,29 @@ export default function StudentPage() {
     }).filter((record) => record.studentKey === session.studentKey);
   }, [session, rawAttendance, realtimeUsers, profiles, holidays, classSessions]);
   const mergedRecords = useMemo(() => mergeAttendanceRecords(records, liveRecords), [records, liveRecords]);
-
+  const resolvedRecords = useMemo(
+    () => dedupeStudentLedgerRecords(mergedRecords),
+    [mergedRecords]
+  );
+  const todayDateKey = hasHydrated ? formatDateKey(new Date()) : "";
+  const completedSessions = useMemo(
+    () => classSessions.filter((sessionEntry) => !todayDateKey || sessionEntry.dateKey <= todayDateKey),
+    [classSessions, todayDateKey]
+  );
   const subjectSummary = useMemo(
     () =>
-      Object.values(groupStudentAttendance(mergedRecords)).sort((a, b) =>
+      Object.values(
+        buildStudentSubjectSummary({
+          sessions: completedSessions,
+          attendanceRecords: resolvedRecords,
+        })
+      ).sort((a, b) =>
         (a.subjectCode || "").localeCompare(b.subjectCode || "", undefined, {
           numeric: true,
           sensitivity: "base",
         })
       ),
-    [mergedRecords]
+    [completedSessions, resolvedRecords]
   );
   const subjectOptions = useMemo(
     () => subjectSummary.map((subject) => subject.subjectCode),
@@ -145,11 +159,6 @@ export default function StudentPage() {
 
     return subjectOptions.includes(selectedSubject) ? selectedSubject : subjectOptions[0];
   }, [selectedSubject, subjectOptions]);
-  const todayDateKey = hasHydrated ? formatDateKey(new Date()) : "";
-  const completedSessions = useMemo(
-    () => classSessions.filter((sessionEntry) => !todayDateKey || sessionEntry.dateKey <= todayDateKey),
-    [classSessions, todayDateKey]
-  );
   const completedSubjectSessions = useMemo(() => {
     if (!effectiveSubject) {
       return [];
@@ -157,25 +166,32 @@ export default function StudentPage() {
 
     return completedSessions.filter((sessionEntry) => sessionEntry.subjectCode === effectiveSubject);
   }, [completedSessions, effectiveSubject]);
-  const completedSubjectTotals = useMemo(
-    () =>
-      completedSessions.reduce((totals, sessionEntry) => {
-        totals[sessionEntry.subjectCode] = (totals[sessionEntry.subjectCode] || 0) + 1;
-        return totals;
-      }, {}),
-    [completedSessions]
-  );
   const filteredRecords = useMemo(() => {
     if (!effectiveSubject) {
-      return mergedRecords;
+      return resolvedRecords;
     }
 
-    return mergedRecords.filter((record) => record.subjectCode === effectiveSubject);
-  }, [mergedRecords, effectiveSubject]);
+    return resolvedRecords.filter((record) => record.subjectCode === effectiveSubject);
+  }, [resolvedRecords, effectiveSubject]);
+  const selectedSubjectSummary = useMemo(
+    () => {
+      const subject = subjectSummary.find((entry) => entry.subjectCode === effectiveSubject);
+
+      if (!subject) {
+        return null;
+      }
+      return {
+        ...subject,
+        total: subject.total || 0,
+        absent: Math.max((subject.total || 0) - subject.present, 0),
+      };
+    },
+    [subjectSummary, effectiveSubject]
+  );
   const stats = useMemo(() => {
     const baseStats = summarizeAttendance(filteredRecords);
-    const totalClasses = completedSubjectSessions.length;
-    const present = filteredRecords.filter((record) => record.status === "Present").length;
+    const present = selectedSubjectSummary?.present || 0;
+    const totalClasses = selectedSubjectSummary?.total || completedSubjectSessions.length;
     const absent = Math.max(totalClasses - present, 0);
 
     return {
@@ -185,27 +201,7 @@ export default function StudentPage() {
       absent,
       attendanceRate: totalClasses ? Math.round((present / totalClasses) * 100) : 0,
     };
-  }, [completedSubjectSessions, filteredRecords]);
-  const selectedSubjectSummary = useMemo(
-    () => {
-      const subject = subjectSummary.find((entry) => entry.subjectCode === effectiveSubject);
-
-      if (!subject) {
-        return null;
-      }
-
-      const totalClasses = completedSessions.filter(
-        (sessionEntry) => sessionEntry.subjectCode === subject.subjectCode
-      ).length;
-
-      return {
-        ...subject,
-        total: totalClasses,
-        absent: Math.max(totalClasses - subject.present, 0),
-      };
-    },
-    [completedSessions, subjectSummary, effectiveSubject]
-  );
+  }, [completedSubjectSessions.length, filteredRecords, selectedSubjectSummary]);
   const syncState = useMemo(() => {
     if (!hasHydrated) {
       return "Loading attendance status...";
@@ -411,7 +407,7 @@ export default function StudentPage() {
                     {subject.facultyName}
                   </p>
                   <p className="mt-4 text-sm text-slate-300">
-                    Present {subject.present} / {completedSubjectTotals[subject.subjectCode] || 0}
+                    Present {subject.present} / {subject.total}
                   </p>
                 </div>
               ))

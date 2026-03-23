@@ -4,16 +4,11 @@ import { PERIODS, SUBJECTS, WEEKLY_TIMETABLE } from "@/utils/timetable";
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 
 const TIMETABLE_SLOTS = [
-  { type: "period", id: "period-1", label: "Period 1", startTime: "08:30", endTime: "09:20" },
-  { type: "period", id: "period-2", label: "Period 2", startTime: "09:20", endTime: "10:10" },
+  ...PERIODS.slice(0, 2).map((period) => ({ type: "period", ...period })),
   { type: "break",  id: "short-break", label: "Break",  startTime: "10:10", endTime: "10:30" },
-  { type: "period", id: "period-3", label: "Period 3", startTime: "10:30", endTime: "11:20" },
-  { type: "period", id: "period-4", label: "Period 4", startTime: "11:20", endTime: "12:10" },
-  { type: "break",  id: "lunch-break", label: "Lunch Break", startTime: "12:10", endTime: "13:30" },
-  { type: "period", id: "period-5", label: "Period 5", startTime: "13:30", endTime: "14:20" },
-  { type: "period", id: "period-6", label: "Period 6", startTime: "14:30", endTime: "15:20" },
-  { type: "period", id: "period-7", label: "Period 7", startTime: "15:20", endTime: "16:10" },
-  { type: "period", id: "period-8", label: "Period 8", startTime: "16:20", endTime: "17:10" },
+  ...PERIODS.slice(2, 4).map((period) => ({ type: "period", ...period })),
+  { type: "break",  id: "lunch-break", label: "Lunch Break", startTime: "12:10", endTime: "14:30" },
+  ...PERIODS.slice(4).map((period) => ({ type: "period", ...period })),
 ];
 
 

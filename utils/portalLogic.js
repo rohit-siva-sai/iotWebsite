@@ -289,6 +289,61 @@ export function groupStudentAttendance(records) {
   }, {});
 }
 
+export function buildStudentSubjectSummary({ sessions = [], attendanceRecords = [] }) {
+  const subjectMap = sessions.reduce((groups, session) => {
+    const existing = groups[session.subjectCode] || {
+      subjectCode: session.subjectCode,
+      subjectName: session.subjectName || "Unknown Subject",
+      facultyName: session.facultyName || "",
+      total: 0,
+      present: 0,
+      absent: 0,
+    };
+
+    existing.total += 1;
+    groups[session.subjectCode] = existing;
+    return groups;
+  }, {});
+
+  const presentBySubject = attendanceRecords.reduce((groups, record) => {
+    if (record.status !== "Present" || !record.subjectCode) {
+      return groups;
+    }
+
+    const key = record.subjectCode;
+
+    if (!groups[key]) {
+      groups[key] = new Set();
+    }
+
+    groups[key].add(record.sessionId || record.docId || record.id || record.scannedAt || `${key}-${groups[key].size}`);
+    return groups;
+  }, {});
+
+  Object.entries(presentBySubject).forEach(([subjectCode, presentSessions]) => {
+    const existing = subjectMap[subjectCode] || {
+      subjectCode,
+      subjectName:
+        attendanceRecords.find((record) => record.subjectCode === subjectCode)?.subjectName ||
+        "Unknown Subject",
+      facultyName:
+        attendanceRecords.find((record) => record.subjectCode === subjectCode)?.facultyName || "",
+      total: 0,
+      present: 0,
+      absent: 0,
+    };
+
+    existing.present = Math.min(existing.total, presentSessions.size);
+    subjectMap[subjectCode] = existing;
+  });
+
+  Object.values(subjectMap).forEach((subject) => {
+    subject.absent = Math.max(subject.total - subject.present, 0);
+  });
+
+  return subjectMap;
+}
+
 export function groupAttendanceBySubject(records) {
   return records.reduce((groups, record) => {
     const key = record.subjectCode || "UNKNOWN";
@@ -307,10 +362,86 @@ export function groupAttendanceBySubject(records) {
   }, {});
 }
 
+function isPlaceholderStudentName(value) {
+  return /^student\s+\d+$/i.test(String(value || "").trim());
+}
+
+function getStudentLedgerRecordKey(record) {
+  if (record.sessionId) {
+    return record.sessionId;
+  }
+
+  return [
+    record.subjectCode || "",
+    record.dateKey || "",
+    record.periodStart || "",
+    record.periodEnd || "",
+    record.periodLabel || "",
+  ].join("__");
+}
+
+function getAttendanceRecordScore(record) {
+  let score = 0;
+
+  if (record.sessionId) {
+    score += 5;
+  }
+
+  if (record.rollNo) {
+    score += 4;
+  }
+
+  if (record.userId && String(record.userId).trim().length > 3) {
+    score += 3;
+  }
+
+  if (record.name && !isPlaceholderStudentName(record.name)) {
+    score += 2;
+  }
+
+  if (record.studentKey && !String(record.studentKey).startsWith("guest-")) {
+    score += 1;
+  }
+
+  return score;
+}
+
+export function dedupeStudentLedgerRecords(records) {
+  const deduped = records.reduce((groups, record) => {
+    const key = getStudentLedgerRecordKey(record);
+    const existing = groups[key];
+
+    if (!existing) {
+      groups[key] = record;
+      return groups;
+    }
+
+    const existingScore = getAttendanceRecordScore(existing);
+    const nextScore = getAttendanceRecordScore(record);
+
+    if (nextScore > existingScore) {
+      groups[key] = record;
+      return groups;
+    }
+
+    if (nextScore === existingScore && (record.scannedAt || "") >= (existing.scannedAt || "")) {
+      groups[key] = record;
+    }
+
+    return groups;
+  }, {});
+
+  return Object.values(deduped).sort((a, b) => (b.scannedAt || "").localeCompare(a.scannedAt || ""));
+}
+
 export function mergeAttendanceRecords(...recordSets) {
   const merged = {};
 
   function getAttendanceRecordKey(record) {
+    if (record.rawRecordKey) {
+      return record.rawRecordKey;
+    }
+
     if (record.sessionId && record.studentKey) {
       return `${record.sessionId}__${record.studentKey}`;
     }
@@ -335,6 +466,13 @@ export function mergeAttendanceRecords(...recordSets) {
 
     if (nextGrace !== currentGrace) {
       return nextGrace;
+    }
+
+    const currentScore = getAttendanceRecordScore(currentRecord);
+    const nextScore = getAttendanceRecordScore(nextRecord);
+
+    if (nextScore !== currentScore) {
+      return nextScore > currentScore;
     }
 
     return (nextRecord.scannedAt || "") >= (currentRecord.scannedAt || "");
