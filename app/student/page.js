@@ -6,8 +6,12 @@ import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import {
   collection,
+  doc,
+  getDoc,
   onSnapshot,
   query,
+  serverTimestamp,
+  setDoc,
   where,
 } from "firebase/firestore";
 import { onValue, ref } from "firebase/database";
@@ -22,10 +26,17 @@ import TimetableBoard from "@/components/TimetableBoard";
 import { database, firestore } from "@/lib/firebase";
 import { useSessionStore } from "@/lib/sessionStore";
 import { formatDateKey } from "@/utils/timetable";
-import { ACADEMIC_HOLIDAYS, generateBaseClassSessions, normalizeExtraClass } from "@/utils/academicCalendar";
 import {
+  ACADEMIC_HOLIDAYS,
+  generateBaseClassSessions,
+  hasSessionStarted,
+  normalizeExtraClass,
+} from "@/utils/academicCalendar";
+import {
+  buildAttendanceSummaryDocId,
   buildStudentSubjectSummary,
   dedupeStudentLedgerRecords,
+  mergeAttendanceRecordIntoSummary,
   mergeAttendanceRecords,
   normalizeFirestoreProfile,
   normalizeHoliday,
@@ -128,10 +139,92 @@ export default function StudentPage() {
     () => dedupeStudentLedgerRecords(mergedRecords),
     [mergedRecords]
   );
+
+  useEffect(() => {
+    if (!liveRecords.length) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    async function syncLiveRecords() {
+      await Promise.all(
+        liveRecords.map(async (record) => {
+          if (!record.docId) {
+            return;
+          }
+
+          const docRef = doc(firestore, "userAttendance", record.docId);
+          const existingSnapshot = await getDoc(docRef);
+          const existingRecord = existingSnapshot.exists() ? existingSnapshot.data() : null;
+
+          if (
+            existingRecord?.scannedAt &&
+            record.scannedAt &&
+            existingRecord.scannedAt <= record.scannedAt
+          ) {
+            return;
+          }
+
+          if (isCancelled) {
+            return;
+          }
+
+          await setDoc(
+            docRef,
+            {
+              ...record,
+              updatedAt: serverTimestamp(),
+              createdAt: existingRecord?.createdAt || serverTimestamp(),
+              source: existingRecord?.source || "realtime",
+            },
+            { merge: true }
+          );
+
+          const summaryRef = doc(
+            firestore,
+            "attendanceSummaries",
+            buildAttendanceSummaryDocId(record)
+          );
+          const existingSummarySnapshot = await getDoc(summaryRef);
+          const existingSummary = existingSummarySnapshot.exists() ? existingSummarySnapshot.data() : null;
+          const nextSummary = mergeAttendanceRecordIntoSummary(record, existingSummary);
+
+          if (!nextSummary) {
+            return;
+          }
+
+          await setDoc(
+            summaryRef,
+            {
+              ...nextSummary,
+              updatedAt: serverTimestamp(),
+              source: "realtime",
+            },
+            { merge: true }
+          );
+        })
+      );
+    }
+
+    syncLiveRecords().catch((error) => {
+      console.error("Unable to sync live student attendance.", error);
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [liveRecords]);
+
   const todayDateKey = hasHydrated ? formatDateKey(new Date()) : "";
   const completedSessions = useMemo(
-    () => classSessions.filter((sessionEntry) => !todayDateKey || sessionEntry.dateKey <= todayDateKey),
-    [classSessions, todayDateKey]
+    () => {
+      const now = hasHydrated ? new Date() : null;
+      return classSessions.filter(
+        (sessionEntry) => !now || hasSessionStarted(sessionEntry, now)
+      );
+    },
+    [classSessions, hasHydrated]
   );
   const subjectSummary = useMemo(
     () =>

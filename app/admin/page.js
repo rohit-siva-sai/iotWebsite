@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { collection, doc, onSnapshot, query, serverTimestamp, setDoc, where } from "firebase/firestore";
+import { collection, doc, getDoc, onSnapshot, query, serverTimestamp, setDoc, where } from "firebase/firestore";
 import { onValue, ref } from "firebase/database";
 import { CalendarPlus2, LogOut, ShieldCheck, Users, Zap } from "lucide-react";
 import GlassCard from "@/components/GlassCard";
@@ -17,10 +17,13 @@ import TimetableBoard from "@/components/TimetableBoard";
 import { database, firestore } from "@/lib/firebase";
 import { useSessionStore } from "@/lib/sessionStore";
 import {
+  buildAttendanceSummaryDocId,
   buildAdminRoster,
   buildLatestDayAttendance,
-  buildProfessorSubjectSummary,
+  buildProfessorSummaryFromStoredSummaries,
+  mergeAttendanceRecordIntoSummary,
   mergeAttendanceRecords,
+  normalizeAttendanceSummary,
   normalizeFirestoreProfile,
   normalizeHoliday,
   processRealtimeAttendance,
@@ -29,6 +32,7 @@ import { formatDateKey, getWeekKey, getWeekdayName, SUBJECTS } from "@/utils/tim
 import {
   ACADEMIC_HOLIDAYS,
   generateBaseClassSessions,
+  hasSessionStarted,
   normalizeExtraClass,
 } from "@/utils/academicCalendar";
 
@@ -40,7 +44,8 @@ export default function AdminPage() {
   const [rawAttendance, setRawAttendance] = useState(null);
   const [realtimeUsers, setRealtimeUsers] = useState({});
   const [profiles, setProfiles] = useState([]);
-  const [records, setRecords] = useState([]);
+  const [latestRecordsState, setLatestRecordsState] = useState({ dateKey: "", records: [] });
+  const [summaryRecords, setSummaryRecords] = useState([]);
   const [holidays, setHolidays] = useState([]);
   const [extraClasses, setExtraClasses] = useState([]);
   const [selectedSubject, setSelectedSubject] = useState("all");
@@ -63,10 +68,6 @@ export default function AdminPage() {
       return;
     }
 
-    const sessionsSource = subjectScopedCode
-      ? query(collection(firestore, "userAttendance"), where("subjectCode", "==", subjectScopedCode))
-      : collection(firestore, "userAttendance");
-
     const unsubscribeProfiles = onSnapshot(collection(firestore, "users"), (snapshot) => {
       setProfiles(snapshot.docs.map(normalizeFirestoreProfile));
     });
@@ -79,11 +80,12 @@ export default function AdminPage() {
       setExtraClasses(snapshot.docs.map(normalizeExtraClass));
     });
 
-    const unsubscribeRecords = onSnapshot(sessionsSource, (snapshot) => {
-      const nextRecords = snapshot.docs
-        .map((entry) => ({ id: entry.id, ...entry.data() }))
-        .sort((a, b) => b.scannedAt.localeCompare(a.scannedAt));
-      setRecords(nextRecords);
+    const summarySource = subjectScopedCode
+      ? query(collection(firestore, "attendanceSummaries"), where("subjectCode", "==", subjectScopedCode))
+      : collection(firestore, "attendanceSummaries");
+
+    const unsubscribeSummaries = onSnapshot(summarySource, (snapshot) => {
+      setSummaryRecords(snapshot.docs.map(normalizeAttendanceSummary));
     });
 
     const unsubscribeRealtime = onValue(ref(database), (snapshot) => {
@@ -97,7 +99,7 @@ export default function AdminPage() {
       unsubscribeProfiles();
       unsubscribeHolidays();
       unsubscribeExtraClasses();
-      unsubscribeRecords();
+      unsubscribeSummaries();
       unsubscribeRealtime();
     };
   }, [hasHydrated, subjectScopedCode]);
@@ -132,7 +134,81 @@ export default function AdminPage() {
       ? nextRecords.filter((record) => record.subjectCode === subjectScopedCode)
       : nextRecords;
   }, [rawAttendance, realtimeUsers, profiles, holidays, classSessions, subjectScopedCode]);
-  const mergedRecords = useMemo(() => mergeAttendanceRecords(records, liveRecords), [records, liveRecords]);
+  useEffect(() => {
+    if (!liveRecords.length) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    async function syncLiveRecords() {
+      await Promise.all(
+        liveRecords.map(async (record) => {
+          if (!record.docId) {
+            return;
+          }
+
+          const docRef = doc(firestore, "userAttendance", record.docId);
+          const existingSnapshot = await getDoc(docRef);
+          const existingRecord = existingSnapshot.exists() ? existingSnapshot.data() : null;
+
+          if (
+            existingRecord?.scannedAt &&
+            record.scannedAt &&
+            existingRecord.scannedAt <= record.scannedAt
+          ) {
+            return;
+          }
+
+          if (isCancelled) {
+            return;
+          }
+
+          await setDoc(
+            docRef,
+            {
+              ...record,
+              updatedAt: serverTimestamp(),
+              createdAt: existingRecord?.createdAt || serverTimestamp(),
+              source: existingRecord?.source || "realtime",
+            },
+            { merge: true }
+          );
+
+          const summaryRef = doc(
+            firestore,
+            "attendanceSummaries",
+            buildAttendanceSummaryDocId(record)
+          );
+          const existingSummarySnapshot = await getDoc(summaryRef);
+          const existingSummary = existingSummarySnapshot.exists() ? existingSummarySnapshot.data() : null;
+          const nextSummary = mergeAttendanceRecordIntoSummary(record, existingSummary);
+
+          if (!nextSummary) {
+            return;
+          }
+
+          await setDoc(
+            summaryRef,
+            {
+              ...nextSummary,
+              updatedAt: serverTimestamp(),
+              source: "realtime",
+            },
+            { merge: true }
+          );
+        })
+      );
+    }
+
+    syncLiveRecords().catch((error) => {
+      console.error("Unable to sync live admin attendance.", error);
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [liveRecords]);
 
   const effectiveSubject = session?.subjectCode || selectedSubject;
   const syncState = useMemo(() => {
@@ -144,26 +220,35 @@ export default function AdminPage() {
       return "Live attendance connected.";
     }
 
-    return records.length ? "Showing saved attendance records." : scanState;
-  }, [hasHydrated, liveRecords, records, scanState]);
+    return summaryRecords.length ? "Showing saved attendance summaries." : scanState;
+  }, [hasHydrated, liveRecords, summaryRecords, scanState]);
   const filteredSessions = useMemo(() => {
-    const sessionsUntilToday = classSessions.filter(
-      (entry) => !todayDateKey || entry.dateKey <= todayDateKey
+    const now = hasHydrated ? new Date() : null;
+    const sessionsUntilNow = classSessions.filter(
+      (entry) => !now || hasSessionStarted(entry, now)
     );
 
     if (effectiveSubject === "all") {
-      return sessionsUntilToday;
+      return sessionsUntilNow;
     }
 
-    return sessionsUntilToday.filter((entry) => entry.subjectCode === effectiveSubject);
-  }, [classSessions, effectiveSubject, todayDateKey]);
-  const filteredRecords = useMemo(() => {
+    return sessionsUntilNow.filter((entry) => entry.subjectCode === effectiveSubject);
+  }, [classSessions, effectiveSubject, hasHydrated]);
+  const latestDateKey = useMemo(() => filteredSessions.map((session) => session.dateKey).sort().at(-1) || "", [
+    filteredSessions,
+  ]);
+  const filteredLatestRecords = useMemo(() => {
+    const scopedLatestRecords =
+      latestDateKey && latestRecordsState.dateKey === latestDateKey
+        ? latestRecordsState.records
+        : [];
+
     if (effectiveSubject === "all") {
-      return mergedRecords;
+      return scopedLatestRecords;
     }
 
-    return mergedRecords.filter((entry) => entry.subjectCode === effectiveSubject);
-  }, [mergedRecords, effectiveSubject]);
+    return scopedLatestRecords.filter((entry) => entry.subjectCode === effectiveSubject);
+  }, [latestDateKey, latestRecordsState, effectiveSubject]);
   const professorSubjectName = useMemo(() => {
     if (effectiveSubject === "all") {
       return "All Subjects";
@@ -176,22 +261,22 @@ export default function AdminPage() {
   }, [effectiveSubject]);
   const adminRoster = useMemo(() => buildAdminRoster(profiles, 33), [profiles]);
   const studentSummary = useMemo(
-    () =>
-      buildProfessorSubjectSummary({
-        roster: adminRoster,
-        sessions: filteredSessions,
-        attendanceRecords: filteredRecords,
-      }),
-    [adminRoster, filteredSessions, filteredRecords]
+    () => buildProfessorSummaryFromStoredSummaries({
+      roster: adminRoster,
+      sessions: filteredSessions,
+      summaries: summaryRecords,
+      subjectCode: effectiveSubject,
+    }),
+    [adminRoster, filteredSessions, summaryRecords, effectiveSubject]
   );
   const latestDayAttendance = useMemo(
     () =>
       buildLatestDayAttendance({
         roster: adminRoster,
         sessions: filteredSessions,
-        attendanceRecords: filteredRecords,
+        attendanceRecords: filteredLatestRecords,
       }),
-    [adminRoster, filteredSessions, filteredRecords]
+    [adminRoster, filteredSessions, filteredLatestRecords]
   );
   const presentStudents = useMemo(
     () => studentSummary.filter((student) => student.present > 0).length,
@@ -207,6 +292,28 @@ export default function AdminPage() {
         studentSummary.length
     );
   }, [studentSummary]);
+
+  useEffect(() => {
+    if (!hasHydrated || !latestDateKey) {
+      return;
+    }
+
+    const latestDayQuery = query(
+      collection(firestore, "userAttendance"),
+      where("dateKey", "==", latestDateKey)
+    );
+
+    const unsubscribeLatestDay = onSnapshot(latestDayQuery, (snapshot) => {
+      const nextRecords = snapshot.docs
+        .map((entry) => ({ id: entry.id, ...entry.data() }))
+        .sort((a, b) => (b.scannedAt || "").localeCompare(a.scannedAt || ""));
+      setLatestRecordsState({ dateKey: latestDateKey, records: nextRecords });
+    });
+
+    return () => {
+      unsubscribeLatestDay();
+    };
+  }, [hasHydrated, latestDateKey]);
 
   function handleLogout() {
     clearSession();

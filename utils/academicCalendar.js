@@ -111,19 +111,62 @@ function toMinutes(timeValue) {
   return Number(hours) * 60 + Number(minutes);
 }
 
+export function hasSessionStarted(session, referenceDate = new Date()) {
+  if (!session?.dateKey) {
+    return false;
+  }
+
+  const sessionDate = parseDateKey(session.dateKey);
+  const sessionMinutes = toMinutes(session.startTime || session.periodStart);
+  const referenceMinutes = referenceDate.getHours() * 60 + referenceDate.getMinutes();
+  const sessionDayKey = formatDateKey(sessionDate);
+  const referenceDayKey = formatDateKey(referenceDate);
+
+  if (sessionDayKey < referenceDayKey) {
+    return true;
+  }
+
+  if (sessionDayKey > referenceDayKey) {
+    return false;
+  }
+
+  return sessionMinutes <= referenceMinutes;
+}
+
 export function findMatchingSession(timestamp, sessions) {
   const dateKey = formatDateKey(timestamp);
   const minutes = timestamp.getHours() * 60 + timestamp.getMinutes();
+  const matchingSessions = sessions.filter((session) => {
+    if (session.dateKey !== dateKey) {
+      return false;
+    }
 
-  return (
-    sessions.find((session) => {
-      if (session.dateKey !== dateKey) {
-        return false;
-      }
+    const start = toMinutes(session.startTime || session.periodStart);
+    const end = toMinutes(session.endTime || session.periodEnd);
+    return minutes >= start && minutes <= end;
+  });
 
-      const start = toMinutes(session.startTime || session.periodStart);
-      const end = toMinutes(session.endTime || session.periodEnd);
-      return minutes >= start && minutes <= end;
-    }) || null
-  );
+  if (!matchingSessions.length) {
+    return null;
+  }
+
+  return matchingSessions.sort((left, right) => {
+    const leftIsExtra = left.source === "extra";
+    const rightIsExtra = right.source === "extra";
+
+    if (leftIsExtra !== rightIsExtra) {
+      return leftIsExtra ? -1 : 1;
+    }
+
+    const leftDuration =
+      toMinutes(left.endTime || left.periodEnd) - toMinutes(left.startTime || left.periodStart);
+    const rightDuration =
+      toMinutes(right.endTime || right.periodEnd) - toMinutes(right.startTime || right.periodStart);
+
+    if (leftDuration !== rightDuration) {
+      return leftDuration - rightDuration;
+    }
+
+    return toMinutes(right.startTime || right.periodStart) - toMinutes(left.startTime || left.periodStart);
+  })[0];
 }

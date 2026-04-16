@@ -109,6 +109,30 @@ export function normalizeHoliday(docSnapshot) {
   };
 }
 
+export function normalizeAttendanceSummary(docSnapshot) {
+  const data = docSnapshot.data();
+
+  return {
+    id: docSnapshot.id,
+    studentKey: data.studentKey || "",
+    subjectCode: data.subjectCode || "",
+    subjectName: data.subjectName || "",
+    facultyCode: data.facultyCode || "",
+    facultyName: data.facultyName || "",
+    profileId: data.profileId || "",
+    name: data.name || "Unknown user",
+    userId: data.userId || "",
+    rollNo: data.rollNo || "",
+    presentCount: Number(data.presentCount || 0),
+    lateCount: Number(data.lateCount || 0),
+    sessionStatusById: data.sessionStatusById || {},
+    latestScannedAt: data.latestScannedAt || null,
+    latestDateKey: data.latestDateKey || "",
+    latestSessionId: data.latestSessionId || "",
+    updatedAt: data.updatedAt || null,
+  };
+}
+
 export function flattenRealtimeAttendance(node, path = [], records = []) {
   if (!node || typeof node !== "object") {
     return records;
@@ -368,7 +392,7 @@ function isPlaceholderStudentName(value) {
 
 function getStudentLedgerRecordKey(record) {
   if (record.sessionId) {
-    return record.sessionId;
+    return `${record.sessionId}__${record.studentKey || record.userId || record.rollNo || record.name || ""}`;
   }
 
   return [
@@ -377,6 +401,7 @@ function getStudentLedgerRecordKey(record) {
     record.periodStart || "",
     record.periodEnd || "",
     record.periodLabel || "",
+    record.studentKey || record.userId || record.rollNo || record.name || "",
   ].join("__");
 }
 
@@ -406,6 +431,58 @@ function getAttendanceRecordScore(record) {
   return score;
 }
 
+function getAttendanceRecordKey(record) {
+  if (record.sessionId && record.studentKey) {
+    return `${record.sessionId}__${record.studentKey}`;
+  }
+
+  return record.docId || record.id || record.rawRecordKey || "";
+}
+
+function isPreferredAttendanceRecord(nextRecord, currentRecord) {
+  if (!currentRecord) {
+    return true;
+  }
+
+  const nextScannedAt = nextRecord.scannedAt || "";
+  const currentScannedAt = currentRecord.scannedAt || "";
+
+  if (nextScannedAt && currentScannedAt && nextScannedAt !== currentScannedAt) {
+    return nextScannedAt < currentScannedAt;
+  }
+
+  if (nextScannedAt && !currentScannedAt) {
+    return true;
+  }
+
+  if (!nextScannedAt && currentScannedAt) {
+    return false;
+  }
+
+  const currentPresent = currentRecord.status === "Present";
+  const nextPresent = nextRecord.status === "Present";
+
+  if (nextPresent !== currentPresent) {
+    return nextPresent;
+  }
+
+  const currentGrace = Boolean(currentRecord.isWithinGraceWindow);
+  const nextGrace = Boolean(nextRecord.isWithinGraceWindow);
+
+  if (nextGrace !== currentGrace) {
+    return nextGrace;
+  }
+
+  const currentScore = getAttendanceRecordScore(currentRecord);
+  const nextScore = getAttendanceRecordScore(nextRecord);
+
+  if (nextScore !== currentScore) {
+    return nextScore > currentScore;
+  }
+
+  return false;
+}
+
 export function dedupeStudentLedgerRecords(records) {
   const deduped = records.reduce((groups, record) => {
     const key = getStudentLedgerRecordKey(record);
@@ -416,15 +493,7 @@ export function dedupeStudentLedgerRecords(records) {
       return groups;
     }
 
-    const existingScore = getAttendanceRecordScore(existing);
-    const nextScore = getAttendanceRecordScore(record);
-
-    if (nextScore > existingScore) {
-      groups[key] = record;
-      return groups;
-    }
-
-    if (nextScore === existingScore && (record.scannedAt || "") >= (existing.scannedAt || "")) {
+    if (isPreferredAttendanceRecord(record, existing)) {
       groups[key] = record;
     }
 
@@ -434,49 +503,61 @@ export function dedupeStudentLedgerRecords(records) {
   return Object.values(deduped).sort((a, b) => (b.scannedAt || "").localeCompare(a.scannedAt || ""));
 }
 
+export function buildAttendanceSummaryDocId(record) {
+  return `${record.subjectCode || "UNKNOWN"}__${record.studentKey || "unknown"}`;
+}
+
+export function mergeAttendanceRecordIntoSummary(record, existingSummary = null) {
+  const currentSessionMap = existingSummary?.sessionStatusById || {};
+  const existingSession = currentSessionMap[record.sessionId];
+
+  if (
+    existingSession?.scannedAt &&
+    record.scannedAt &&
+    existingSession.scannedAt <= record.scannedAt
+  ) {
+    return null;
+  }
+
+  const sessionStatusById = {
+    ...currentSessionMap,
+    [record.sessionId]: {
+      status: record.status,
+      late: Boolean(record.minutesAfterStart > 5),
+      scannedAt: record.scannedAt,
+      dateKey: record.dateKey,
+      periodLabel: record.periodLabel,
+    },
+  };
+
+  const sessionEntries = Object.values(sessionStatusById);
+  const presentCount = sessionEntries.filter((entry) => entry.status === "Present").length;
+  const lateCount = sessionEntries.filter((entry) => entry.late).length;
+  const latestEntry = sessionEntries
+    .slice()
+    .sort((left, right) => (right.scannedAt || "").localeCompare(left.scannedAt || ""))[0] || null;
+
+  return {
+    studentKey: record.studentKey,
+    subjectCode: record.subjectCode,
+    subjectName: record.subjectName,
+    facultyCode: record.facultyCode,
+    facultyName: record.facultyName,
+    profileId: record.profileId || "",
+    name: record.name,
+    userId: record.userId || "",
+    rollNo: record.rollNo || "",
+    presentCount,
+    lateCount,
+    sessionStatusById,
+    latestScannedAt: latestEntry?.scannedAt || record.scannedAt,
+    latestDateKey: latestEntry?.dateKey || record.dateKey,
+    latestSessionId: record.sessionId,
+  };
+}
+
 export function mergeAttendanceRecords(...recordSets) {
   const merged = {};
-
-  function getAttendanceRecordKey(record) {
-    if (record.rawRecordKey) {
-      return record.rawRecordKey;
-    }
-
-    if (record.sessionId && record.studentKey) {
-      return `${record.sessionId}__${record.studentKey}`;
-    }
-
-    return record.docId || record.id || "";
-  }
-
-  function isPreferredAttendanceRecord(nextRecord, currentRecord) {
-    if (!currentRecord) {
-      return true;
-    }
-
-    const currentPresent = currentRecord.status === "Present";
-    const nextPresent = nextRecord.status === "Present";
-
-    if (nextPresent !== currentPresent) {
-      return nextPresent;
-    }
-
-    const currentGrace = Boolean(currentRecord.isWithinGraceWindow);
-    const nextGrace = Boolean(nextRecord.isWithinGraceWindow);
-
-    if (nextGrace !== currentGrace) {
-      return nextGrace;
-    }
-
-    const currentScore = getAttendanceRecordScore(currentRecord);
-    const nextScore = getAttendanceRecordScore(nextRecord);
-
-    if (nextScore !== currentScore) {
-      return nextScore > currentScore;
-    }
-
-    return (nextRecord.scannedAt || "") >= (currentRecord.scannedAt || "");
-  }
 
   recordSets
     .flat()
@@ -597,6 +678,65 @@ export function buildProfessorSubjectSummary({ roster, sessions, attendanceRecor
         name: profile.name,
         rollNo: profile.rollNo || "",
         userId: profile.userId || "",
+        totalClasses,
+        present,
+        absent,
+        late,
+        attendanceRate: totalClasses ? Math.round((present / totalClasses) * 100) : 0,
+      };
+    })
+    .sort((a, b) =>
+      (a.rollNo || a.userId || "").localeCompare(b.rollNo || b.userId || "", undefined, {
+        numeric: true,
+        sensitivity: "base",
+      })
+    );
+}
+
+export function buildProfessorSummaryFromStoredSummaries({ roster, sessions, summaries, subjectCode = "all" }) {
+  const summariesByStudent = summaries.reduce((lookup, summary) => {
+    if (!summary.studentKey) {
+      return lookup;
+    }
+
+    if (subjectCode !== "all" && summary.subjectCode !== subjectCode) {
+      return lookup;
+    }
+
+    const existing = lookup[summary.studentKey] || {
+      studentKey: summary.studentKey,
+      name: summary.name,
+      rollNo: summary.rollNo || "",
+      userId: summary.userId || "",
+      present: 0,
+      late: 0,
+    };
+
+    existing.name = existing.name || summary.name;
+    existing.rollNo = existing.rollNo || summary.rollNo || "";
+    existing.userId = existing.userId || summary.userId || "";
+    existing.present += Number(summary.presentCount || 0);
+    existing.late += Number(summary.lateCount || 0);
+    lookup[summary.studentKey] = existing;
+    return lookup;
+  }, {});
+
+  return roster
+    .map((profile) => {
+      const summary = summariesByStudent[profile.studentKey];
+      const totalClasses =
+        subjectCode === "all"
+          ? sessions.length
+          : sessions.filter((session) => session.subjectCode === subjectCode).length;
+      const present = Math.min(summary?.present || 0, totalClasses);
+      const late = Math.min(summary?.late || 0, present);
+      const absent = Math.max(totalClasses - present, 0);
+
+      return {
+        studentKey: profile.studentKey,
+        name: summary?.name || profile.name,
+        rollNo: summary?.rollNo || profile.rollNo || "",
+        userId: summary?.userId || profile.userId || "",
         totalClasses,
         present,
         absent,
